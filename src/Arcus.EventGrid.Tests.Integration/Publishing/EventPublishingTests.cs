@@ -30,6 +30,12 @@ namespace Arcus.EventGrid.Tests.Integration.Publishing
                 .AddJsonFile(path: "appsettings.json")
                 .AddEnvironmentVariables()
                 .Build();
+
+            var connectionString = Configuration.GetValue<string>("Arcus:ServiceBus:ConnectionString");
+            var topicName = Configuration.GetValue<string>("Arcus:ServiceBus:TopicName");
+
+            var serviceBusEventConsumerHostOptions = new ServiceBusEventConsumerHostOptions(topicName, connectionString);
+            _serviceBusEventConsumerHost = new ServiceBusEventConsumerHost(serviceBusEventConsumerHostOptions, _testLogger);
         }
 
         protected IConfiguration Configuration { get; }
@@ -37,15 +43,12 @@ namespace Arcus.EventGrid.Tests.Integration.Publishing
         public async Task DisposeAsync()
         {
             await _serviceBusEventConsumerHost.Stop();
+            _serviceBusEventConsumerHost = null;
         }
 
         public async Task InitializeAsync()
         {
-            var connectionString = Configuration.GetValue<string>("Arcus:ServiceBus:ConnectionString");
-            var topicName = Configuration.GetValue<string>("Arcus:ServiceBus:TopicName");
-
-            var serviceBusEventConsumerHostOptions = new ServiceBusEventConsumerHostOptions(topicName, connectionString);
-            _serviceBusEventConsumerHost = await ServiceBusEventConsumerHost.Start(serviceBusEventConsumerHostOptions, _testLogger);
+            await _serviceBusEventConsumerHost.Start();
         }
 
         [Fact]

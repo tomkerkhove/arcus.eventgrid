@@ -14,27 +14,30 @@ namespace Arcus.EventGrid.Testing.Infrastructure.Hosts.ServiceBus
     /// </summary>
     public class ServiceBusEventConsumerHost : EventConsumerHost
     {
-        private readonly SubscriptionClient _subscriptionClient;
         private readonly ManagementClient _managementClient;
         private readonly bool _deleteSubscriptionOnStop;
-
-        private static bool isHostShuttingDown;
+        private readonly string _connectionString;
+        private SubscriptionClient _subscriptionClient;
         public string Id { get; } = Guid.NewGuid().ToString();
 
-        private ServiceBusEventConsumerHost(ServiceBusEventConsumerHostOptions consumerHostOptions, string subscriptionName, SubscriptionClient subscriptionClient, ManagementClient managementClient, ILogger logger)
+        /// <summary>
+        ///     Constructor
+        /// </summary>
+        /// <param name="consumerHostOptions">
+        ///     Configuration options that indicate what Service Bus entities to use and how they should behave
+        /// </param>
+        /// <param name="logger">Logger to use for writing event information during the hybrid connection</param>
+        public ServiceBusEventConsumerHost(ServiceBusEventConsumerHostOptions consumerHostOptions, ILogger logger)
             : base(logger)
         {
-            Guard.NotNullOrWhitespace(subscriptionName, nameof(subscriptionName));
             Guard.NotNull(consumerHostOptions, nameof(consumerHostOptions));
-            Guard.NotNull(subscriptionClient, nameof(subscriptionClient));
-            Guard.NotNull(managementClient, nameof(managementClient));
+            Guard.NotNull(logger, nameof(logger));
 
             TopicPath = consumerHostOptions.TopicPath;
-            SubscriptionName = subscriptionName;
 
+            _connectionString = consumerHostOptions.ConnectionString;
+            _managementClient = new ManagementClient(consumerHostOptions.ConnectionString);
             _deleteSubscriptionOnStop = consumerHostOptions.DeleteSubscriptionOnStop;
-            _subscriptionClient = subscriptionClient;
-            _managementClient = managementClient;
         }
 
         /// <summary>
@@ -45,33 +48,33 @@ namespace Arcus.EventGrid.Testing.Infrastructure.Hosts.ServiceBus
         /// <summary>
         ///     Name of the subscription that was created
         /// </summary>
-        public string SubscriptionName { get; }
+        public string SubscriptionName { get; private set; }
+
+        /// <summary>
+        ///     Endpoint of the Service Bus Namespace
+        /// </summary>
+        public string ServiceBusEndpoint { get; private set; }
 
         /// <summary>
         ///     Start receiving traffic
         /// </summary>
-        /// <param name="consumerHostOptions">
-        ///     Configuration options that indicate what Service Bus entities to use and how they should behave
-        /// </param>
-        /// <param name="logger">Logger to use for writing event information during the hybrid connection</param>
-        public static async Task<ServiceBusEventConsumerHost> Start(ServiceBusEventConsumerHostOptions consumerHostOptions, ILogger logger)
+        public async Task Start()
         {
-            Guard.NotNull(consumerHostOptions, nameof(consumerHostOptions));
-            Guard.NotNull(logger, nameof(logger));
+            if (string.IsNullOrWhiteSpace(SubscriptionName) == false)
+            {
+                throw new InvalidOperationException("Host is already started");
+            }
 
-            logger.LogInformation("Starting Service Bus event consumer host");
+            _logger.LogInformation("Starting Service Bus event consumer host");
 
-            var managementClient = new ManagementClient(consumerHostOptions.ConnectionString);
+            SubscriptionName = $"Test-{Guid.NewGuid().ToString()}";
+            await CreateSubscriptionAsync(TopicPath, _managementClient, SubscriptionName).ConfigureAwait(continueOnCapturedContext: false);
+            _logger.LogInformation("Created subscription '{subscription}' on topic '{topic}'", SubscriptionName, TopicPath);
 
-            var subscriptionName = $"Test-{Guid.NewGuid().ToString()}";
-            await CreateSubscriptionAsync(consumerHostOptions.TopicPath, managementClient, subscriptionName).ConfigureAwait(continueOnCapturedContext: false);
-            logger.LogInformation("Created subscription '{subscription}' on topic '{topic}'", subscriptionName, consumerHostOptions.TopicPath);
-
-            var subscriptionClient = new SubscriptionClient(consumerHostOptions.ConnectionString, consumerHostOptions.TopicPath, subscriptionName);
-            StartMessagePump(subscriptionClient, logger);
-            logger.LogInformation("Message pump started on '{SubscriptionName}' (topic '{TopicPath}' for endpoint '{ServiceBusEndpoint}')", subscriptionName, consumerHostOptions.TopicPath, subscriptionClient.ServiceBusConnection?.Endpoint?.AbsoluteUri);
-
-            return new ServiceBusEventConsumerHost(consumerHostOptions, subscriptionName, subscriptionClient, managementClient, logger);
+            _subscriptionClient = new SubscriptionClient(_connectionString, TopicPath, SubscriptionName);
+            ServiceBusEndpoint = _subscriptionClient.ServiceBusConnection?.Endpoint?.AbsoluteUri;
+            StartMessagePump();
+            _logger.LogInformation("Message pump started on '{SubscriptionName}' (topic '{TopicPath}' for endpoint '{ServiceBusEndpoint}')", SubscriptionName, TopicPath, ServiceBusEndpoint);
         }
 
         /// <summary>
@@ -80,7 +83,6 @@ namespace Arcus.EventGrid.Testing.Infrastructure.Hosts.ServiceBus
         public override async Task Stop()
         {
             _logger.LogInformation("Stopping host");
-            isHostShuttingDown = true;
 
             if (_deleteSubscriptionOnStop)
             {
@@ -93,20 +95,20 @@ namespace Arcus.EventGrid.Testing.Infrastructure.Hosts.ServiceBus
             await base.Stop();
         }
 
-        private static void StartMessagePump(SubscriptionClient subscriptionClient, ILogger logger)
+        private void StartMessagePump()
         {
-            var messageHandlerOptions = new MessageHandlerOptions(async exceptionReceivedEventArgs => await HandleException(exceptionReceivedEventArgs, logger))
+            var messageHandlerOptions = new MessageHandlerOptions(async exceptionReceivedEventArgs => await HandleException(exceptionReceivedEventArgs, _logger))
             {
                 AutoComplete = false,
                 MaxConcurrentCalls = 10
             };
 
-            subscriptionClient.RegisterMessageHandler(async (receivedMessage, cancellationToken) => await HandleNewMessage(receivedMessage, subscriptionClient, cancellationToken, logger), messageHandlerOptions);
+            _subscriptionClient.RegisterMessageHandler(async (receivedMessage, cancellationToken) => await HandleNewMessage(receivedMessage, _subscriptionClient, cancellationToken, _logger), messageHandlerOptions);
         }
 
         private static async Task HandleNewMessage(Message receivedMessage, SubscriptionClient subscriptionClient, CancellationToken cancellationToken, ILogger logger)
         {
-            if (receivedMessage == null || isHostShuttingDown)
+            if (receivedMessage == null)
             {
                 return;
             }
@@ -135,7 +137,7 @@ namespace Arcus.EventGrid.Testing.Infrastructure.Hosts.ServiceBus
             return Task.CompletedTask;
         }
 
-        private static async Task CreateSubscriptionAsync(string topicPath, ManagementClient managementClient, string subscriptionName)
+        private async Task CreateSubscriptionAsync(string topicPath, ManagementClient managementClient, string subscriptionName)
         {
             var subscriptionDescription = new SubscriptionDescription(topicPath, subscriptionName)
             {
